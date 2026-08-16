@@ -1,0 +1,9 @@
+# Compiled binary
+/chat-relay
+
+# Test / coverage output
+*.out
+
+# Local secrets — NEVER commit the FCM service-account key
+service-account*.json
+*.env
