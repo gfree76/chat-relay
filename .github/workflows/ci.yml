@@ -1,0 +1,35 @@
+name: CI
+
+# PR gate. Merges to main are built + deployed by deploy.yml.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.22"
+
+      - name: Format check
+        run: |
+          out="$(gofmt -l .)"; test -z "$out" || { echo "gofmt needed:"; echo "$out"; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests (race)
+        run: go test -race ./...
+
+      - name: Integration tests
+        run: go test -race -tags integration -run RoundTrip ./...
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -o /dev/null .
+
+      - name: Docker build
+        run: docker build -t chat-relay:ci .

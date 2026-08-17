@@ -1,0 +1,69 @@
+name: Deploy
+
+# On merge to main: build + push the image to GHCR, then deploy to the Hetzner
+# box (the same host running Authentik) over SSH via docker compose.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    env:
+      # Skip the SSH deploy until the box secrets exist, instead of failing red.
+      HAS_SSH: ${{ secrets.SSH_HOST != '' }}
+    steps:
+      # Raw SSH (no third-party action). Requires these repo secrets:
+      #   SSH_HOST   - the Hetzner box hostname/IP
+      #   SSH_USER   - deploy user
+      #   SSH_KEY    - private key for that user (ed25519)
+      #   SSH_KNOWN_HOSTS - output of `ssh-keyscan <host>` (pins the host key)
+      #   DEPLOY_DIR - dir on the box holding compose.yaml for the relay
+      - name: Deploy over SSH
+        if: env.HAS_SSH == 'true'
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
+            "cd '$DEPLOY_DIR' && docker compose pull chat-relay && docker compose up -d chat-relay && docker image prune -f"
