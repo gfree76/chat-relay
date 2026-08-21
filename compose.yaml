@@ -1,38 +1,24 @@
 # Deployment unit for the Hetzner box (alongside Authentik).
-# The reverse-proxy wiring below is a TEMPLATE — uncomment/adjust for whatever
-# proxy the box already runs (Authentik embedded proxy, Traefik, nginx, Caddy).
-# The relay must be reachable by the phones over HTTPS at a stable hostname
-# (e.g. relay.itsalwaysreefreemas.org).
+#
+# The box terminates TLS with nginx + certbot on a public IP (no Cloudflare —
+# that fronts the desktop only). So the relay publishes to loopback and nginx
+# reverse-proxies chat-relay.itsalwaysreefreemas.org to it. See deploy/README.md.
 
 services:
   chat-relay:
-    image: ghcr.io/gfree76/chat_relay:latest # set by the deploy workflow
+    image: ghcr.io/gfree76/chat-relay:latest # tag is rewritten by the deploy workflow
     restart: unless-stopped
     environment:
       ADDR: ":8080"
       # FCM_PROJECT_ID: your-firebase-project-id
       # GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/fcm-sa.json
-    healthcheck:
-      test: ["CMD", "/chat-relay", "--help"] # replace with a curl/wget healthz if the image gains one
-      interval: 30s
-      timeout: 3s
-      retries: 3
 
-    # --- Option A: Traefik (labels) ---
-    # labels:
-    #   - "traefik.enable=true"
-    #   - "traefik.http.routers.chat-relay.rule=Host(`relay.itsalwaysreefreemas.org`)"
-    #   - "traefik.http.routers.chat-relay.entrypoints=websecure"
-    #   - "traefik.http.routers.chat-relay.tls.certresolver=le"
-    #   - "traefik.http.services.chat-relay.loadbalancer.server.port=8080"
+    # Loopback only — nginx is the sole public entrance. Binding 0.0.0.0 here
+    # would expose the relay directly on the box's public IP, bypassing TLS.
+    ports:
+      - "127.0.0.1:8080:8080"
 
-    # --- Option B: behind nginx/Caddy or Authentik proxy: publish to loopback only ---
-    # ports:
-    #   - "127.0.0.1:8080:8080"
-
-    # networks:
-    #   - proxy   # join the same network as your reverse proxy
-
-# networks:
-#   proxy:
-#     external: true
+    # No healthcheck on purpose: the runtime is distroless (no shell, no curl)
+    # and the binary has no self-probe flag, so there is nothing honest to run
+    # here yet. restart: unless-stopped covers crashes. If compose-level health
+    # becomes useful, add a -healthcheck flag to main.go that GETs /healthz.
