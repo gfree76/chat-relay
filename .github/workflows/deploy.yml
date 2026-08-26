@@ -2,9 +2,16 @@ name: Deploy
 
 # On merge to main: build + push the image to GHCR, then deploy to the Hetzner
 # box (the same host running Authentik) over SSH via docker compose.
+#
+# workflow_dispatch adds a manual "Run workflow" button (and `gh workflow run
+# deploy.yml`) that does the same build-push + deploy against a chosen ref
+# (default: main). Useful as a redeploy button, and as a way to exercise the
+# pipeline without waiting on a push event. The deploy job still no-ops while
+# SSH_HOST is unset, so dispatching before the box is wired just rebuilds :latest.
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: deploy-${{ github.ref }}
