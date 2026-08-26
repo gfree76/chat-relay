@@ -7,6 +7,7 @@
 services:
   chat-relay:
     image: ghcr.io/gfree76/chat-relay:latest # tag is rewritten by the deploy workflow
+    container_name: chat-relay # else compose names it chat-relay-chat-relay-1
     restart: unless-stopped
     environment:
       ADDR: ":8080"
