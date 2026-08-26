@@ -1,9 +1,12 @@
 name: CI
 
 # PR gate. Merges to main are built + deployed by deploy.yml.
+# workflow_dispatch adds a manual "Run workflow" button (and `gh workflow run
+# ci.yml`) so the checks can be kicked off without opening a PR.
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
