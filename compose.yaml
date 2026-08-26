@@ -1,8 +1,8 @@
 # Deployment unit for the Hetzner box (alongside Authentik).
 #
-# The box terminates TLS with nginx + certbot on a public IP (no Cloudflare —
-# that fronts the desktop only). So the relay publishes to loopback and nginx
-# reverse-proxies chat-relay.itsalwaysreefreemas.org to it. See deploy/README.md.
+# The box terminates TLS with nginx + certbot on a public IP. The relay
+# publishes to loopback and nginx reverse-proxies its hostname to it.
+# See deploy/README.md.
 
 services:
   chat-relay:

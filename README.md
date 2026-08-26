@@ -60,15 +60,15 @@ make docker            # distroless, non-root, static binary
 ### Deploy prerequisites (set as repo secrets)
 | Secret | Meaning |
 |--------|---------|
-| `SSH_HOST` | Hetzner box host/IP |
+| `SSH_HOST` | box host/IP |
 | `SSH_USER` | deploy user |
 | `SSH_KEY` | that user's private key (ed25519) |
 | `SSH_KNOWN_HOSTS` | `ssh-keyscan <host>` output (pins the host key) |
 | `DEPLOY_DIR` | dir on the box holding this repo's `compose.yaml` |
 
-On the box: `compose.yaml` runs the GHCR image; wire it into the existing reverse
-proxy (Traefik/nginx/Caddy/Authentik proxy) so the phones reach it over HTTPS at a
-stable hostname (e.g. `relay.itsalwaysreefreemas.org`).
+On the box: `compose.yaml` runs the GHCR image behind nginx + certbot so the
+phones reach it over HTTPS at a stable hostname. Full runbook in
+[`deploy/README.md`](deploy/README.md).
 
 ## Status / TODO
 - [ ] Implement `fcmPush` — the FCM HTTP v1 call (`golang.org/x/oauth2/google` for the SA token).
