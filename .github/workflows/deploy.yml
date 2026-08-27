@@ -45,7 +45,6 @@ jobs:
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
 
-  # Deploy over raw SSH, one named step per stage so a failure points at itself.
   # Requires repo secrets: SSH_HOST, SSH_USER, SSH_KEY (ed25519 private),
   # SSH_KNOWN_HOSTS (ssh-keyscan output), DEPLOY_DIR (compose.yaml's dir on box).
   deploy:
