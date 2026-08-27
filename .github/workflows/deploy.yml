@@ -82,7 +82,13 @@ jobs:
           # etc.) actually reach the box. The box previously ran a hand-placed
           # copy that never updated — repo changes silently no-op'd on deploy.
           scp -i ~/.ssh/id_ed25519 compose.yaml "$SSH_USER@$SSH_HOST:$DEPLOY_DIR/compose.yaml"
+          # Everything below is &&-chained with NO '|| true': the post-deploy
+          # verification GATES the deploy. If we can't confirm the right image is
+          # running and serving, the deploy has failed — a red run here is the
+          # signal, not noise. \$(...) runs on the box (empty -> inspect errors ->
+          # fail), so a missing container fails loudly rather than silently.
           ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
             "cd '$DEPLOY_DIR' && docker compose pull chat-relay && docker compose up -d chat-relay && docker image prune -f && \
-             echo '--- deployed image on the box ---' && docker compose images chat-relay && \
-             docker compose ps -q chat-relay | xargs -r docker inspect --format 'running digest: {{index .RepoDigests 0}}' || true"
+             echo '--- deployed image ---' && docker compose images chat-relay && \
+             echo '--- running image ---' && docker inspect \$(docker compose ps -q chat-relay) --format 'running={{.State.Running}} digest={{index .RepoDigests 0}}' && \
+             echo '--- health check ---' && curl -fsS --retry 5 --retry-delay 2 http://127.0.0.1:8080/healthz && echo ' <- healthz OK'"
