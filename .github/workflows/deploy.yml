@@ -52,6 +52,10 @@ jobs:
       # Skip the SSH deploy until the box secrets exist, instead of failing red.
       HAS_SSH: ${{ secrets.SSH_HOST != '' }}
     steps:
+      # Need the repo on the runner so we can ship compose.yaml to the box.
+      - uses: actions/checkout@v7
+        if: env.HAS_SSH == 'true'
+
       # Raw SSH (no third-party action). Requires these repo secrets:
       #   SSH_HOST   - the Hetzner box hostname/IP
       #   SSH_USER   - deploy user
@@ -74,7 +78,11 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # Ship the compose file so compose.yaml changes (container_name, env,
+          # etc.) actually reach the box. The box previously ran a hand-placed
+          # copy that never updated — repo changes silently no-op'd on deploy.
+          scp -i ~/.ssh/id_ed25519 compose.yaml "$SSH_USER@$SSH_HOST:$DEPLOY_DIR/compose.yaml"
           ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
             "cd '$DEPLOY_DIR' && docker compose pull chat-relay && docker compose up -d chat-relay && docker image prune -f && \
              echo '--- deployed image on the box ---' && docker compose images chat-relay && \
-             docker inspect chat-relay --format 'running digest: {{index .RepoDigests 0}}'"
+             docker compose ps -q chat-relay | xargs -r docker inspect --format 'running digest: {{index .RepoDigests 0}}' || true"
