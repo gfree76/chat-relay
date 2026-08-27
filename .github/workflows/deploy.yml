@@ -26,6 +26,8 @@ jobs:
     permissions:
       contents: read
       packages: write # push to GHCR
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
 
@@ -37,6 +39,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -45,44 +48,59 @@ jobs:
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
 
+  # Deploy over raw SSH, one named step per stage so a failure points at itself.
+  # Requires repo secrets: SSH_HOST, SSH_USER, SSH_KEY (ed25519 private),
+  # SSH_KNOWN_HOSTS (ssh-keyscan output), DEPLOY_DIR (compose.yaml's dir on box).
   deploy:
     needs: build-push
     runs-on: ubuntu-latest
     env:
-      # Skip the SSH deploy until the box secrets exist, instead of failing red.
+      # Skip the deploy until the box secrets exist, instead of failing red.
       HAS_SSH: ${{ secrets.SSH_HOST != '' }}
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
     steps:
-      # Need the repo on the runner so we can ship compose.yaml to the box.
       - uses: actions/checkout@v7
         if: env.HAS_SSH == 'true'
 
-      # Raw SSH (no third-party action). Requires these repo secrets:
-      #   SSH_HOST   - the Hetzner box hostname/IP
-      #   SSH_USER   - deploy user
-      #   SSH_KEY    - private key for that user (ed25519)
-      #   SSH_KNOWN_HOSTS - output of `ssh-keyscan <host>` (pins the host key)
-      #   DEPLOY_DIR - dir on the box holding compose.yaml for the relay
-      - name: Deploy over SSH
+      - name: Configure SSH
         if: env.HAS_SSH == 'true'
         env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_USER: ${{ secrets.SSH_USER }}
           SSH_KEY: ${{ secrets.SSH_KEY }}
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
-          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
-          GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          echo "Deploying ${IMAGE}:${GIT_SHA} (pulled on the box as :latest)"
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          # Ship compose.yaml — the source of truth for the deploy.
+
+      - name: Deploy
+        if: env.HAS_SSH == 'true'
+        run: |
+          set -euo pipefail
           scp -i ~/.ssh/id_ed25519 compose.yaml "$SSH_USER@$SSH_HOST:$DEPLOY_DIR/compose.yaml"
-          # Verify running image and health check.
           ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
-            "cd '$DEPLOY_DIR' && docker compose pull chat-relay && docker compose up -d chat-relay && docker image prune -f && \
-             echo '--- deployed image ---' && docker compose images chat-relay && \
-             echo '--- running image ---' && docker inspect \$(docker compose ps -q chat-relay) --format 'running={{.State.Running}} digest={{index .RepoDigests 0}}' && \
-             echo '--- health check ---' && curl -fsS --retry 5 --retry-delay 2 http://127.0.0.1:8080/healthz && echo ' <- healthz OK'"
+            "cd '$DEPLOY_DIR' && docker compose pull chat-relay && docker compose up -d chat-relay && docker image prune -f"
+
+      - name: Verify deployed image
+        if: env.HAS_SSH == 'true'
+        env:
+          EXPECTED: ${{ needs.build-push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          running=$(ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
+            "cd '$DEPLOY_DIR' && docker inspect \$(docker compose ps -q chat-relay) --format '{{index .RepoDigests 0}}'")
+          running=${running##*@}
+          echo "expected: $EXPECTED"
+          echo "running:  $running"
+          [ "$running" = "$EXPECTED" ] || { echo "MISMATCH: box is not running the image just built"; exit 1; }
+
+      - name: Health check
+        if: env.HAS_SSH == 'true'
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
+            "curl -fsS --retry 5 --retry-delay 2 http://127.0.0.1:8080/healthz"
+          echo " <- healthz OK"
