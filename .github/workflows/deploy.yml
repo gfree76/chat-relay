@@ -78,15 +78,13 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          # Ship the compose file so compose.yaml changes (container_name, env,
-          # etc.) actually reach the box. The box previously ran a hand-placed
-          # copy that never updated — repo changes silently no-op'd on deploy.
+          # The repo's compose.yaml is the source of truth; ship it to the box
+          # so container_name, env, and image tag all deploy from version control.
           scp -i ~/.ssh/id_ed25519 compose.yaml "$SSH_USER@$SSH_HOST:$DEPLOY_DIR/compose.yaml"
-          # Everything below is &&-chained with NO '|| true': the post-deploy
-          # verification GATES the deploy. If we can't confirm the right image is
-          # running and serving, the deploy has failed — a red run here is the
-          # signal, not noise. \$(...) runs on the box (empty -> inspect errors ->
-          # fail), so a missing container fails loudly rather than silently.
+          # Post-deploy verification gates the deploy: &&-chained, no escape hatch.
+          # Confirm the running image, then require /healthz to serve. \$(...) runs
+          # on the box; an empty result makes inspect error, so a missing container
+          # fails the deploy.
           ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
             "cd '$DEPLOY_DIR' && docker compose pull chat-relay && docker compose up -d chat-relay && docker image prune -f && \
              echo '--- deployed image ---' && docker compose images chat-relay && \
