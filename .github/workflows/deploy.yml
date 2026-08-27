@@ -4,10 +4,7 @@ name: Deploy
 # box (the same host running Authentik) over SSH via docker compose.
 #
 # workflow_dispatch adds a manual "Run workflow" button (and `gh workflow run
-# deploy.yml`) that does the same build-push + deploy against a chosen ref
-# (default: main). Useful as a redeploy button, and as a way to exercise the
-# pipeline without waiting on a push event. The deploy job still no-ops while
-# SSH_HOST is unset, so dispatching before the box is wired just rebuilds :latest.
+# deploy.yml`) for redeploying a chosen ref without a push event.
 on:
   push:
     branches: [main]
@@ -55,17 +52,28 @@ jobs:
     needs: build-push
     runs-on: ubuntu-latest
     env:
-      # Skip the deploy until the box secrets exist, instead of failing red.
-      HAS_SSH: ${{ secrets.SSH_HOST != '' }}
       SSH_HOST: ${{ secrets.SSH_HOST }}
       SSH_USER: ${{ secrets.SSH_USER }}
       DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
     steps:
+      - name: Check deploy secrets
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for v in SSH_HOST SSH_USER SSH_KEY SSH_KNOWN_HOSTS DEPLOY_DIR; do
+            [ -n "${!v}" ] || missing+=("$v")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "Missing required deploy secrets: ${missing[*]}" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
-        if: env.HAS_SSH == 'true'
 
       - name: Configure SSH
-        if: env.HAS_SSH == 'true'
         env:
           SSH_KEY: ${{ secrets.SSH_KEY }}
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
@@ -77,7 +85,6 @@ jobs:
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
 
       - name: Deploy
-        if: env.HAS_SSH == 'true'
         run: |
           set -euo pipefail
           scp -i ~/.ssh/id_ed25519 compose.yaml "$SSH_USER@$SSH_HOST:$DEPLOY_DIR/compose.yaml"
@@ -85,7 +92,6 @@ jobs:
             "cd '$DEPLOY_DIR' && docker compose pull chat-relay && docker compose up -d chat-relay && docker image prune -f"
 
       - name: Verify deployed image
-        if: env.HAS_SSH == 'true'
         env:
           EXPECTED: ${{ needs.build-push.outputs.digest }}
         run: |
@@ -98,7 +104,6 @@ jobs:
           [ "$running" = "$EXPECTED" ] || { echo "MISMATCH: box is not running the image just built"; exit 1; }
 
       - name: Health check
-        if: env.HAS_SSH == 'true'
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
