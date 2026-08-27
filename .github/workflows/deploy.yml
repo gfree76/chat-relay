@@ -45,8 +45,6 @@ jobs:
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
 
-  # Requires repo secrets: SSH_HOST, SSH_USER, SSH_KEY (ed25519 private),
-  # SSH_KNOWN_HOSTS (ssh-keyscan output), DEPLOY_DIR (compose.yaml's dir on box).
   deploy:
     needs: build-push
     runs-on: ubuntu-latest
