@@ -84,9 +84,9 @@ jobs:
       - name: Deploy
         run: |
           set -euo pipefail
-          scp -i ~/.ssh/id_ed25519 compose.yaml "$SSH_USER@$SSH_HOST:$DEPLOY_DIR/compose.yaml"
+          scp -i ~/.ssh/id_ed25519 compose.yaml "$SSH_USER@$SSH_HOST:$DEPLOY_DIR/compose.yaml.new"
           ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
-            "cd '$DEPLOY_DIR' && docker compose pull chat-relay && docker compose up -d chat-relay && docker image prune -f"
+            "cd '$DEPLOY_DIR' && mv compose.yaml.new compose.yaml && docker compose pull chat-relay && docker compose up -d chat-relay && docker image prune -f"
 
       - name: Verify deployed image
         env:
