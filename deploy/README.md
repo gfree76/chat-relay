@@ -83,11 +83,10 @@ only** — not the token CI uses, nothing with write scope:
 
 ## 5. Deploy directory
 
-`deploy.yml` cds here and runs compose, so this must hold `compose.yaml` and be
-owned by the deploy user:
+`deploy.yml` cds here and runs compose. Create it owned by the deploy user and
+leave it empty — the workflow ships `compose.yaml` in:
 
     sudo -u DEPLOY_USER mkdir -p /home/DEPLOY_USER/chat-relay
-    # copy compose.yaml from the repo root into /home/DEPLOY_USER/chat-relay/
 
 ## 6. nginx + TLS
 
