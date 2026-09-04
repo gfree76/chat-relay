@@ -73,4 +73,3 @@ phones reach it over HTTPS at a stable hostname. Full runbook in
 ## Status / TODO
 - [ ] Implement `fcmPush` — the FCM HTTP v1 call (`golang.org/x/oauth2/google` for the SA token).
 - [ ] Persist the store (SQLite/Bolt) so registrations survive restarts.
-- [ ] Finalize reverse-proxy + DNS on the box.
