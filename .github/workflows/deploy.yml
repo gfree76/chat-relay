@@ -111,7 +111,7 @@ jobs:
         run: |
           set -euo pipefail
           running=$(ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
-            "cd '$DEPLOY_DIR' && docker inspect \$(docker compose ps -q chat-relay) --format '{{index .RepoDigests 0}}'")
+            "cd '$DEPLOY_DIR' && docker image inspect \$(docker inspect --format '{{.Image}}' \$(docker compose ps -q chat-relay)) --format '{{index .RepoDigests 0}}'")
           running=${running##*@}
           echo "expected: $EXPECTED"
           echo "running:  $running"
