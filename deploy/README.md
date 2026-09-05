@@ -88,6 +88,12 @@ leave it empty — the workflow ships `compose.yaml` in:
 
     sudo -u DEPLOY_USER mkdir -p /home/DEPLOY_USER/chat-relay
 
+The SQLite database lives in `data/`, bind-mounted into the container. The image
+runs as uid 65532, so that uid must own the directory:
+
+    sudo mkdir -p /home/DEPLOY_USER/chat-relay/data
+    sudo chown 65532:65532 /home/DEPLOY_USER/chat-relay/data
+
 ## 6. nginx + TLS
 
 Edit `deploy/nginx/chat-relay.conf` to set `server_name RELAY_HOST;`, then:
@@ -127,3 +133,5 @@ Watch it serve:
   push nothing.
 - `compose.yaml` tracks `:latest`. The workflow also tags each image with the
   commit SHA, so pinning is available if a rollback is ever needed.
+- Registrations live in `data/devices.db` on the box. Deleting it forces every
+  client to re-register and issues them new auth tokens.
