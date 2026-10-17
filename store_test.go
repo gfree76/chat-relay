@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -56,6 +57,44 @@ func TestStoreRegisterRejectsTakenUser(t *testing.T) {
 	}
 	if got, _, _ := s.lookup("geoff"); got.FCMToken != "tok1" {
 		t.Fatalf("device token overwritten by rejected register: %+v", got)
+	}
+}
+
+func TestStoreConcurrentRegisterOneWinner(t *testing.T) {
+	s := testStore(t)
+
+	const contenders = 2
+	tokens := make([]string, contenders)
+	errs := make([]error, contenders)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			tokens[i], errs[i] = s.register("geoff", "tok")
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	var winners, taken int
+	for i := range contenders {
+		switch {
+		case errs[i] == nil && tokens[i] != "":
+			winners++
+			if user, ok, err := s.userByAuth(tokens[i]); err != nil || !ok || user != "geoff" {
+				t.Fatalf("winner token resolves to %q ok:%v err:%v, want geoff true nil", user, ok, err)
+			}
+		case errors.Is(errs[i], errUserTaken):
+			taken++
+		default:
+			t.Fatalf("contender %d: token %q err %v, want a token or errUserTaken", i, tokens[i], errs[i])
+		}
+	}
+	if winners != 1 || taken != contenders-1 {
+		t.Fatalf("winners=%d taken=%d, want 1 and %d", winners, taken, contenders-1)
 	}
 }
 

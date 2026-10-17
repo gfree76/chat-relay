@@ -51,17 +51,24 @@ func TestRoundTrip(t *testing.T) {
 	}
 	sender := authToken(resp)
 
-	if resp := post("/register", `{"userId":"wife","fcmToken":"wife-tok"}`, ""); resp.StatusCode != http.StatusOK {
+	resp = post("/register", `{"userId":"wife","fcmToken":"wife-tok"}`, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("register recipient: got %d, want 200", resp.StatusCode)
 	}
-	if resp := post("/send", `{"toUserId":"wife","ciphertext":"Q0lQSEVS"}`, sender); resp.StatusCode != http.StatusAccepted {
+
+	resp = post("/send", `{"toUserId":"wife","ciphertext":"Q0lQSEVS"}`, sender)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("send: got %d, want 202", resp.StatusCode)
 	}
 	if len(fp.calls) != 1 || fp.calls[0].token != "wife-tok" || fp.calls[0].ciphertext != "Q0lQSEVS" {
 		t.Fatalf("push not delivered end-to-end: %+v", fp.calls)
 	}
 
-	if resp := post("/send", `{"toUserId":"wife","ciphertext":"Q0lQSEVS"}`, ""); resp.StatusCode != http.StatusUnauthorized {
+	resp = post("/send", `{"toUserId":"wife","ciphertext":"Q0lQSEVS"}`, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated send: got %d, want 401", resp.StatusCode)
 	}
 }
