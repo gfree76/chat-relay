@@ -8,19 +8,30 @@ are exchanged out-of-band (QR) between clients, so the relay only ever routes.
 ## Why a relay at all?
 FCM lets a device *receive* pushes with no server, but *sending* a push requires
 privileged credentials (a service account) that must never ship in the app. So a
-trusted sender is unavoidable — this is it. Content-blind, in-memory `userId →
-fcmToken` map.
+trusted sender is unavoidable — this is it. Content-blind `userId → fcmToken`
+registry in SQLite.
 
 ## API
 | Method | Path | Body | Purpose |
 |--------|------|------|---------|
-| `POST` | `/register` | `{"userId":"…","fcmToken":"…"}` | remember where to push for a user |
+| `POST` | `/register` | `{"userId":"…","fcmToken":"…"}` | claim a userId; returns `{"authToken":"…"}` |
 | `POST` | `/send` | `{"toUserId":"…","ciphertext":"…"}` | forward ciphertext to that user |
 | `GET`  | `/healthz` | — | liveness check |
 
+## Authentication
+Claiming a `userId` is first-come. `/register` returns an `authToken` once; only its
+SHA-256 hash is stored. That token is required to re-register the same `userId` (which
+clients do as FCM rotates their device token) and to `/send` at all:
+
+```
+Authorization: Bearer <authToken>
+```
+
+Anyone may still claim an *unused* `userId` — see Status / TODO.
+
 ## Layout
 ```
-main.go        wiring + config      store.go     userId → fcmToken map
+main.go        wiring + config      store.go     SQLite registry
 server.go      handlers + routing   push.go      FCM send (stub for now)
 *_test.go      unit tests           integration_test.go  full round-trip (build tag)
 ```
@@ -34,8 +45,10 @@ make help                 # list all targets
 ```
 Smoke it:
 ```bash
-curl -X POST localhost:8080/register -d '{"userId":"geoff","fcmToken":"tok"}'
-curl -X POST localhost:8080/send     -d '{"toUserId":"geoff","ciphertext":"AAAA"}'
+TOKEN=$(curl -sX POST localhost:8080/register \
+  -d '{"userId":"geoff","fcmToken":"tok"}' | jq -r .authToken)
+curl -X POST localhost:8080/send -H "Authorization: Bearer $TOKEN" \
+  -d '{"toUserId":"geoff","ciphertext":"AAAA"}'
 ```
 
 ## Testing
@@ -72,5 +85,5 @@ phones reach it over HTTPS at a stable hostname. Full runbook in
 
 ## Status / TODO
 - [ ] Implement `fcmPush` — the FCM HTTP v1 call (`golang.org/x/oauth2/google` for the SA token).
-- [ ] Persist the store (SQLite/Bolt) so registrations survive restarts.
-- [ ] Finalize reverse-proxy + DNS on the box.
+- [ ] Gate new registrations, so a stranger cannot claim a userId and send.
+- [ ] Cull registrations older than the FCM staleness window.
