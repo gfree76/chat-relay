@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -29,8 +31,7 @@ type pusher interface {
 	push(ctx context.Context, fid, sender, ciphertext string) error
 }
 
-// errUnregistered means FCM reports the target FID will never be valid again,
-// so its registration should be deleted.
+// errUnregistered means FCM reports the target FID will never be valid again.
 var errUnregistered = errors.New("fcm: target is unregistered")
 
 // fitsFCMPayload reports whether the data message for (sender, ciphertext) is
@@ -46,25 +47,42 @@ type fcmSender struct {
 	endpoint string
 }
 
-// newFCMSender builds a sender for projectID using Application Default
-// Credentials (GOOGLE_APPLICATION_CREDENTIALS). It fetches one access token up
-// front so a missing or broken key fails at startup, not on the first send.
-func newFCMSender(ctx context.Context, baseURL, projectID string) (*fcmSender, error) {
-	if projectID == "" {
+type fcmConfig struct {
+	BaseURL         string
+	ProjectID       string
+	CredentialsPath string        // service-account key JSON
+	Timeout         time.Duration // per HTTP request, token mints included
+}
+
+// newFCMSender builds a sender from a service-account key file. It mints one
+// access token up front so a missing or broken key fails at startup, not on
+// the first send.
+func newFCMSender(cfg fcmConfig) (*fcmSender, error) {
+	if cfg.ProjectID == "" {
 		return nil, errors.New("FCM_PROJECT_ID is not set")
 	}
-	creds, err := google.FindDefaultCredentials(ctx, fcmScope)
+	if cfg.CredentialsPath == "" {
+		return nil, errors.New("GOOGLE_APPLICATION_CREDENTIALS is not set; it must name the FCM service-account key file")
+	}
+	key, err := os.ReadFile(cfg.CredentialsPath)
 	if err != nil {
-		return nil, fmt.Errorf("find FCM credentials (set GOOGLE_APPLICATION_CREDENTIALS): %w", err)
+		return nil, fmt.Errorf("read GOOGLE_APPLICATION_CREDENTIALS: %w", err)
+	}
+	// The token source keeps this context for every later mint, so it carries
+	// the timeout client rather than a deadline.
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Timeout: cfg.Timeout})
+	creds, err := google.CredentialsFromJSONWithType(ctx, key, google.ServiceAccount, fcmScope)
+	if err != nil {
+		return nil, fmt.Errorf("parse service-account key %s: %w", cfg.CredentialsPath, err)
 	}
 	if _, err := creds.TokenSource.Token(); err != nil {
-		return nil, fmt.Errorf("fetch FCM access token: %w", err)
+		return nil, fmt.Errorf("mint FCM access token: %w", err)
 	}
 	client := oauth2.NewClient(ctx, creds.TokenSource)
-	client.Timeout = 10 * time.Second
+	client.Timeout = cfg.Timeout
 	return &fcmSender{
 		client:   client,
-		endpoint: baseURL + "/v1/projects/" + url.PathEscape(projectID) + "/messages:send",
+		endpoint: cfg.BaseURL + "/v1/projects/" + url.PathEscape(cfg.ProjectID) + "/messages:send",
 	}, nil
 }
 
@@ -112,7 +130,10 @@ func (f *fcmSender) push(ctx context.Context, fid, sender, ciphertext string) er
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 == 2 {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		// FCM has accepted the message; a broken body doesn't undo that.
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			log.Printf("fcm send: HTTP %d, reading response body: %v", resp.StatusCode, err)
+		}
 		return nil
 	}
 

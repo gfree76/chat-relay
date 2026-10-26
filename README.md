@@ -25,7 +25,8 @@ sender's userId) and `body` (the ciphertext), at high priority. Errors:
 |--------|---------|
 | `401` | missing or unknown auth token |
 | `404` | recipient not registered |
-| `410` | FCM reported the recipient's FID dead (`UNREGISTERED` / `INVALID_ARGUMENT`); its registration, auth token included, was deleted and it must claim its userId again |
+| `410` | recipient is unreachable: FCM reported its FID dead (`UNREGISTERED` / `INVALID_ARGUMENT`), so the FID was cleared. Further sends return `410` without calling FCM until the recipient re-registers with its auth token; its userId claim is kept |
+| `500` | relay storage failure, including failing to record a dead FID |
 | `413` | `sender` + `body` exceed FCM's 4096-byte data payload |
 | `502` | any other FCM failure (FCM's status is logged) |
 
@@ -56,10 +57,10 @@ Crypto is nowhere here — the relay is content-blind by design.
 | `ADDR` | `--addr` | `:8080` | listen address |
 | `STORE_PATH` | `--store` | `devices.db` | SQLite database |
 | `FCM_PROJECT_ID` | — | *required* | Firebase project to send through |
-| `GOOGLE_APPLICATION_CREDENTIALS` | — | *required* | service-account key JSON (scope `firebase.messaging`) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | — | *required* | path to the service-account key JSON (scope `firebase.messaging`); no other credential source is used |
 
-The relay exits at startup if FCM is not configured or the key cannot mint an
-access token. The schema migrates forward on open (`PRAGMA user_version`).
+The relay exits at startup if FCM is not configured, the key is unreadable or
+not a service account, or it cannot mint an access token within 10s. The schema migrates forward on open (`PRAGMA user_version`).
 
 ## Local development
 Running locally sends real pushes, so it needs a service-account key:
@@ -112,6 +113,6 @@ phones reach it over HTTPS at a stable hostname. Full runbook in
 [`deploy/README.md`](deploy/README.md).
 
 ## Status / TODO
-- [x] FCM HTTP v1 delivery to FIDs; dead FIDs are deleted on send.
+- [x] FCM HTTP v1 delivery to FIDs; dead FIDs are cleared on send, keeping the userId claim.
 - [ ] Gate new registrations, so a stranger cannot claim a userId and send.
 - [ ] Cull registrations older than the FCM staleness window.

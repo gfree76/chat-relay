@@ -40,11 +40,34 @@ func TestStoreRegisterLookup(t *testing.T) {
 		t.Fatalf("lookup = %+v ok:%v err:%v, want {tok1} true nil", got, ok, err)
 	}
 
-	if err := s.refresh("geoff", "tok2"); err != nil {
-		t.Fatalf("refresh: %v", err)
+	if err := s.reregister("geoff", token, "tok2"); err != nil {
+		t.Fatalf("reregister: %v", err)
 	}
 	if got, _, _ := s.lookup("geoff"); got.FID != "tok2" {
-		t.Fatalf("after refresh = %+v, want {tok2}", got)
+		t.Fatalf("after reregister = %+v, want {tok2}", got)
+	}
+}
+
+func TestStoreReregisterRequiresOwner(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.register("geoff", "fid1"); err != nil {
+		t.Fatalf("register geoff: %v", err)
+	}
+	other, err := s.register("wife", "wife-fid")
+	if err != nil {
+		t.Fatalf("register wife: %v", err)
+	}
+
+	for name, token := range map[string]string{"empty": "", "unknown": "not-a-token", "another user's": other} {
+		if err := s.reregister("geoff", token, "attacker-fid"); !errors.Is(err, errNotOwner) {
+			t.Fatalf("reregister with %s token = %v, want errNotOwner", name, err)
+		}
+	}
+	if err := s.reregister("nobody", other, "x"); !errors.Is(err, errNotOwner) {
+		t.Fatalf("reregister unknown user = %v, want errNotOwner", err)
+	}
+	if got, _, _ := s.lookup("geoff"); got.FID != "fid1" {
+		t.Fatalf("FID changed by rejected reregister: %+v", got)
 	}
 }
 
@@ -155,7 +178,8 @@ func TestStoreRefreshStampsRegisteredAt(t *testing.T) {
 	clock := time.Unix(1_000, 0)
 	s.now = func() time.Time { return clock }
 
-	if _, err := s.register("geoff", "fid1"); err != nil {
+	token, err := s.register("geoff", "fid1")
+	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if got, _, _ := s.lookup("geoff"); !got.RegisteredAt.Equal(clock) {
@@ -163,35 +187,89 @@ func TestStoreRefreshStampsRegisteredAt(t *testing.T) {
 	}
 
 	clock = time.Unix(2_000, 0)
-	if err := s.refresh("geoff", "fid1"); err != nil {
-		t.Fatalf("refresh: %v", err)
+	if err := s.reregister("geoff", token, "fid1"); err != nil {
+		t.Fatalf("reregister: %v", err)
 	}
 	if got, _, _ := s.lookup("geoff"); !got.RegisteredAt.Equal(clock) {
 		t.Fatalf("registered_at after same-FID refresh = %v, want %v", got.RegisteredAt, clock)
 	}
 }
 
-func TestStoreUnregister(t *testing.T) {
+func TestStoreMarkUnreachableKeepsClaim(t *testing.T) {
 	s := testStore(t)
-	if _, err := s.register("geoff", "fid1"); err != nil {
+	token, err := s.register("geoff", "fid1")
+	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
-	if err := s.unregister("geoff", "stale-fid"); err != nil {
-		t.Fatalf("unregister stale: %v", err)
+	if err := s.markUnreachable("geoff", "fid1"); err != nil {
+		t.Fatalf("markUnreachable: %v", err)
 	}
-	if _, ok, _ := s.lookup("geoff"); !ok {
-		t.Fatal("unregister of a stale FID deleted the current registration")
+	got, ok, err := s.lookup("geoff")
+	if err != nil || !ok || got.FID != "" {
+		t.Fatalf("lookup after markUnreachable = %+v ok:%v err:%v, want empty FID, still registered", got, ok, err)
+	}
+	if user, ok, _ := s.userByAuth(token); !ok || user != "geoff" {
+		t.Fatalf("auth token lost by markUnreachable: %q ok:%v", user, ok)
+	}
+	if _, err := s.register("geoff", "attacker-fid"); !errors.Is(err, errUserTaken) {
+		t.Fatalf("stranger claim of unreachable user = %v, want errUserTaken", err)
+	}
+	if err := s.reregister("geoff", token, "fid2"); err != nil {
+		t.Fatalf("owner reregister after markUnreachable: %v", err)
+	}
+	if got, _, _ := s.lookup("geoff"); got.FID != "fid2" {
+		t.Fatalf("after owner reregister = %+v, want fid2", got)
+	}
+}
+
+func TestStoreMarkUnreachableSparesNewerFID(t *testing.T) {
+	s := testStore(t)
+	token, err := s.register("geoff", "fid1")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := s.reregister("geoff", token, "fid2"); err != nil {
+		t.Fatalf("reregister: %v", err)
+	}
+	if err := s.markUnreachable("geoff", "fid1"); err != nil {
+		t.Fatalf("markUnreachable: %v", err)
+	}
+	if got, _, _ := s.lookup("geoff"); got.FID != "fid2" {
+		t.Fatalf("stale dead-FID clear wiped the newer FID: %+v", got)
+	}
+}
+
+// TestStoreReregisterRacesMarkUnreachable runs an owner's re-registration
+// against a clear of the FID it replaces. In either order the new FID wins.
+func TestStoreReregisterRacesMarkUnreachable(t *testing.T) {
+	s := testStore(t)
+	token, err := s.register("geoff", "dead-fid")
+	if err != nil {
+		t.Fatalf("register: %v", err)
 	}
 
-	if err := s.unregister("geoff", "fid1"); err != nil {
-		t.Fatalf("unregister: %v", err)
-	}
-	if _, ok, _ := s.lookup("geoff"); ok {
-		t.Fatal("registration survived unregister")
-	}
-	if _, err := s.register("geoff", "fid2"); err != nil {
-		t.Fatalf("re-register after unregister: %v", err)
+	for i := range 50 {
+		if err := s.reregister("geoff", token, "dead-fid"); err != nil {
+			t.Fatalf("round %d reset: %v", i, err)
+		}
+		start := make(chan struct{})
+		var (
+			wg                sync.WaitGroup
+			reregErr, markErr error
+		)
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; reregErr = s.reregister("geoff", token, "fresh-fid") }()
+		go func() { defer wg.Done(); <-start; markErr = s.markUnreachable("geoff", "dead-fid") }()
+		close(start)
+		wg.Wait()
+
+		if reregErr != nil || markErr != nil {
+			t.Fatalf("round %d: reregister err %v, markUnreachable err %v", i, reregErr, markErr)
+		}
+		if got, _, _ := s.lookup("geoff"); got.FID != "fresh-fid" {
+			t.Fatalf("round %d: FID = %q, want fresh-fid", i, got.FID)
+		}
 	}
 }
 
@@ -240,6 +318,18 @@ func TestStoreMigratesPR8Database(t *testing.T) {
 			t.Fatalf("user_version = %d err:%v, want %d", version, err, len(migrations))
 		}
 		s.close()
+	}
+
+	s, err := openStore(path)
+	if err != nil {
+		t.Fatalf("reopen migrated db: %v", err)
+	}
+	defer s.close()
+	if err := s.markUnreachable("geoff", "old-fid"); err != nil {
+		t.Fatalf("markUnreachable on migrated db: %v", err)
+	}
+	if got, ok, _ := s.lookup("geoff"); !ok || got.FID != "" {
+		t.Fatalf("migrated row after markUnreachable = %+v ok:%v, want empty FID, still registered", got, ok)
 	}
 }
 

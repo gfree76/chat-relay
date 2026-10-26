@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -9,25 +10,29 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testAccessToken = "test-access-token"
 
-// writeServiceAccount writes a service-account key whose token_uri is a fake
-// OAuth server and points GOOGLE_APPLICATION_CREDENTIALS at it, so
-// newFCMSender runs its real credential path offline.
-func writeServiceAccount(t *testing.T) {
+func serveToken(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, `{"access_token":"`+testAccessToken+`","token_type":"Bearer","expires_in":3600}`)
+}
+
+// writeServiceAccount writes a service-account key whose token_uri is served
+// by tokenHandler and returns its path, so newFCMSender runs its real
+// credential path offline.
+func writeServiceAccount(t *testing.T, tokenHandler http.HandlerFunc) string {
 	t.Helper()
-	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"access_token":"`+testAccessToken+`","token_type":"Bearer","expires_in":3600}`)
-	}))
+	tokenSrv := httptest.NewServer(tokenHandler)
 	t.Cleanup(tokenSrv.Close)
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -53,33 +58,95 @@ func writeServiceAccount(t *testing.T) {
 	if err := os.WriteFile(path, sa, 0o600); err != nil {
 		t.Fatalf("write service account: %v", err)
 	}
-	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", path)
+	return path
+}
+
+func testFCMConfig(baseURL, credentialsPath string) fcmConfig {
+	return fcmConfig{BaseURL: baseURL, ProjectID: "org-test", CredentialsPath: credentialsPath, Timeout: 5 * time.Second}
 }
 
 // testFCM returns a real fcmSender whose FCM endpoint is served by h.
 func testFCM(t *testing.T, h http.HandlerFunc) *fcmSender {
 	t.Helper()
-	writeServiceAccount(t)
 	fcmSrv := httptest.NewServer(h)
 	t.Cleanup(fcmSrv.Close)
-	f, err := newFCMSender(context.Background(), fcmSrv.URL, "org-test")
+	f, err := newFCMSender(testFCMConfig(fcmSrv.URL, writeServiceAccount(t, serveToken)))
 	if err != nil {
 		t.Fatalf("newFCMSender: %v", err)
 	}
 	return f
 }
 
-func TestNewFCMSenderRequiresProjectID(t *testing.T) {
-	writeServiceAccount(t)
-	if _, err := newFCMSender(context.Background(), fcmBaseURL, ""); err == nil || !strings.Contains(err.Error(), "FCM_PROJECT_ID") {
-		t.Fatalf("err = %v, want one naming FCM_PROJECT_ID", err)
+func TestNewFCMSenderRejectsBadConfig(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return path
+	}
+	valid := writeServiceAccount(t, serveToken)
+
+	cases := []struct {
+		name    string
+		mutate  func(*fcmConfig)
+		wantErr string
+	}{
+		{"no project", func(c *fcmConfig) { c.ProjectID = "" }, "FCM_PROJECT_ID is not set"},
+		{"no credentials path", func(c *fcmConfig) { c.CredentialsPath = "" }, "GOOGLE_APPLICATION_CREDENTIALS is not set"},
+		{"missing file", func(c *fcmConfig) { c.CredentialsPath = filepath.Join(dir, "missing.json") }, "read GOOGLE_APPLICATION_CREDENTIALS"},
+		{"not JSON", func(c *fcmConfig) { c.CredentialsPath = write("garbage.json", "not json") }, "parse service-account key"},
+		{"not a service account", func(c *fcmConfig) {
+			c.CredentialsPath = write("user.json", `{"type":"authorized_user","client_id":"x","client_secret":"y","refresh_token":"z"}`)
+		}, "parse service-account key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testFCMConfig(fcmBaseURL, valid)
+			tc.mutate(&cfg)
+			if _, err := newFCMSender(cfg); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want one containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
-func TestNewFCMSenderRequiresCredentials(t *testing.T) {
-	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "missing.json"))
-	if _, err := newFCMSender(context.Background(), fcmBaseURL, "org-test"); err == nil || !strings.Contains(err.Error(), "GOOGLE_APPLICATION_CREDENTIALS") {
-		t.Fatalf("err = %v, want one naming GOOGLE_APPLICATION_CREDENTIALS", err)
+func TestNewFCMSenderIgnoresAmbientCredentials(t *testing.T) {
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", writeServiceAccount(t, serveToken))
+	if _, err := newFCMSender(testFCMConfig(fcmBaseURL, "")); err == nil {
+		t.Fatal("newFCMSender fell back to ambient credentials with no explicit key path")
+	}
+}
+
+func TestNewFCMSenderFailsWhenTokenRejected(t *testing.T) {
+	path := writeServiceAccount(t, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
+	})
+	if _, err := newFCMSender(testFCMConfig(fcmBaseURL, path)); err == nil || !strings.Contains(err.Error(), "mint FCM access token") {
+		t.Fatalf("err = %v, want a token mint failure", err)
+	}
+}
+
+func TestNewFCMSenderTokenMintTimesOut(t *testing.T) {
+	release := make(chan struct{})
+	path := writeServiceAccount(t, func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	defer close(release)
+
+	cfg := testFCMConfig(fcmBaseURL, path)
+	cfg.Timeout = 100 * time.Millisecond
+	start := time.Now()
+	_, err := newFCMSender(cfg)
+	if err == nil {
+		t.Fatal("newFCMSender succeeded against a hung token server")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("startup took %v against a hung token server, want about %v", elapsed, cfg.Timeout)
 	}
 }
 
@@ -143,6 +210,23 @@ func TestFCMSenderErrorMapping(t *testing.T) {
 				t.Fatalf("error leaks the FID or ciphertext: %q", msg)
 			}
 		})
+	}
+}
+
+func TestFCMSenderLogsBrokenSuccessBody(t *testing.T) {
+	f := testFCM(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		_, _ = io.WriteString(w, `{"na`)
+	})
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	if err := f.push(context.Background(), "the-fid", "geoff", "x"); err != nil {
+		t.Fatalf("push after FCM accepted = %v, want nil", err)
+	}
+	if !strings.Contains(logs.String(), "reading response body") {
+		t.Fatalf("truncated success body not logged; logs: %q", logs.String())
 	}
 }
 

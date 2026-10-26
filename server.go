@@ -66,17 +66,12 @@ func (srv *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner, ok, err := srv.store.userByAuth(bearerToken(r))
-	if err != nil {
-		log.Printf("auth lookup: %v", err)
-		http.Error(w, "failed to register", http.StatusInternalServerError)
-		return
-	}
-	if !ok || owner != req.UserID {
+	err = srv.store.reregister(req.UserID, bearerToken(r), req.FID)
+	switch {
+	case errors.Is(err, errNotOwner):
 		http.Error(w, "userId belongs to another client", http.StatusForbidden)
 		return
-	}
-	if err := srv.store.refresh(req.UserID, req.FID); err != nil {
+	case err != nil:
 		log.Printf("refresh %s: %v", req.UserID, err)
 		http.Error(w, "failed to register", http.StatusInternalServerError)
 		return
@@ -120,14 +115,20 @@ func (srv *server) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "recipient not registered", http.StatusNotFound)
 		return
 	}
+	if dev.FID == "" {
+		http.Error(w, "recipient is unreachable until it registers again", http.StatusGone)
+		return
+	}
 	err = srv.pusher.push(r.Context(), dev.FID, sender, req.Ciphertext)
 	switch {
 	case errors.Is(err, errUnregistered):
-		log.Printf("push %s -> %s: %v; deleting registration", sender, req.ToUserID, err)
-		if err := srv.store.unregister(req.ToUserID, dev.FID); err != nil {
-			log.Printf("unregister %s: %v", req.ToUserID, err)
+		log.Printf("push %s -> %s: %v; marking unreachable", sender, req.ToUserID, err)
+		if err := srv.store.markUnreachable(req.ToUserID, dev.FID); err != nil {
+			log.Printf("mark %s unreachable: %v", req.ToUserID, err)
+			http.Error(w, "failed to deliver", http.StatusInternalServerError)
+			return
 		}
-		http.Error(w, "recipient is no longer registered", http.StatusGone)
+		http.Error(w, "recipient is unreachable until it registers again", http.StatusGone)
 		return
 	case err != nil:
 		log.Printf("push %s -> %s failed: %v", sender, req.ToUserID, err)

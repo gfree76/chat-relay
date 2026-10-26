@@ -13,11 +13,11 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
 func main() {
@@ -25,7 +25,12 @@ func main() {
 	storePath := flag.String("store", envOr("STORE_PATH", "devices.db"), "path to the SQLite database")
 	flag.Parse()
 
-	fcm, err := newFCMSender(context.Background(), fcmBaseURL, os.Getenv("FCM_PROJECT_ID"))
+	fcm, err := newFCMSender(fcmConfig{
+		BaseURL:         fcmBaseURL,
+		ProjectID:       os.Getenv("FCM_PROJECT_ID"),
+		CredentialsPath: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+		Timeout:         10 * time.Second,
+	})
 	if err != nil {
 		log.Fatalf("configure FCM: %v", err)
 	}

@@ -157,21 +157,56 @@ func TestSendHandlerPushError(t *testing.T) {
 	}
 }
 
-func TestSendHandlerUnregisteredDeletesRecipient(t *testing.T) {
+func TestSendHandlerDeadFIDMarksRecipientUnreachable(t *testing.T) {
+	srv, fp := newTestServer(t)
+	h := srv.routes()
+	sender := registerUser(t, h, "geoff", "geoff-tok")
+	wife := registerUser(t, h, "wife", "wife-tok")
+	fp.err = fmt.Errorf("%w (HTTP 404 UNREGISTERED)", errUnregistered)
+
+	send := `{"toUserId":"wife","ciphertext":"x"}`
+	if rec := doAuth(t, h, "POST", "/send", send, sender); rec.Code != http.StatusGone {
+		t.Fatalf("dead FID: got %d, want 410", rec.Code)
+	}
+	if got, ok, _ := srv.store.lookup("wife"); !ok || got.FID != "" {
+		t.Fatalf("recipient after dead FID = %+v ok:%v, want registered with no FID", got, ok)
+	}
+
+	fp.err = nil
+	if rec := doAuth(t, h, "POST", "/send", send, sender); rec.Code != http.StatusGone {
+		t.Fatalf("send to unreachable: got %d, want 410", rec.Code)
+	}
+	if len(fp.calls) != 1 {
+		t.Fatalf("send to unreachable recipient reached FCM: %d calls", len(fp.calls))
+	}
+
+	if rec := do(t, h, "POST", "/register", `{"userId":"wife","fid":"attacker-fid"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("stranger claiming unreachable user: got %d, want 403", rec.Code)
+	}
+	if rec := doAuth(t, h, "POST", "/register", `{"userId":"wife","fid":"wife-fid2"}`, wife); rec.Code != http.StatusNoContent {
+		t.Fatalf("owner re-register: got %d, want 204", rec.Code)
+	}
+	if rec := doAuth(t, h, "POST", "/send", send, sender); rec.Code != http.StatusAccepted {
+		t.Fatalf("send after owner re-register: got %d, want 202", rec.Code)
+	}
+	if last := fp.calls[len(fp.calls)-1]; last.fid != "wife-fid2" {
+		t.Fatalf("push went to %q, want wife-fid2", last.fid)
+	}
+}
+
+func TestSendHandlerDeadFIDPersistFailure(t *testing.T) {
 	srv, fp := newTestServer(t)
 	h := srv.routes()
 	sender := registerUser(t, h, "geoff", "geoff-tok")
 	registerUser(t, h, "wife", "wife-tok")
-	fp.err = fmt.Errorf("%w (HTTP 404 UNREGISTERED)", errUnregistered)
+	fp.err = errUnregistered
+	if _, err := srv.store.db.Exec(`CREATE TRIGGER fail_clear BEFORE UPDATE OF fid ON devices
+		WHEN NEW.fid IS NULL BEGIN SELECT RAISE(ABORT, 'disk on fire'); END`); err != nil {
+		t.Fatalf("install failing trigger: %v", err)
+	}
 
-	if rec := doAuth(t, h, "POST", "/send", `{"toUserId":"wife","ciphertext":"x"}`, sender); rec.Code != http.StatusGone {
-		t.Fatalf("unregistered recipient: got %d, want 410", rec.Code)
-	}
-	if _, ok, _ := srv.store.lookup("wife"); ok {
-		t.Fatal("recipient registration survived an UNREGISTERED push")
-	}
-	if _, ok, _ := srv.store.lookup("geoff"); !ok {
-		t.Fatal("sender registration deleted by recipient's UNREGISTERED push")
+	if rec := doAuth(t, h, "POST", "/send", `{"toUserId":"wife","ciphertext":"x"}`, sender); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("failed unreachable mark: got %d, want 500", rec.Code)
 	}
 }
 

@@ -13,14 +13,19 @@ import (
 )
 
 // Device is where to reach a user: their Firebase Installation ID (FID) and
-// when it was last registered.
+// when it was last registered. FID is empty once FCM has reported it dead;
+// the user is unreachable until its owner registers a new one.
 type Device struct {
 	FID          string
 	RegisteredAt time.Time
 }
 
-// errUserTaken means the userId is already claimed by another client.
-var errUserTaken = errors.New("user already registered")
+var (
+	// errUserTaken means the userId is already claimed by another client.
+	errUserTaken = errors.New("user already registered")
+	// errNotOwner means the auth token does not own the userId.
+	errNotOwner = errors.New("auth token does not own user")
+)
 
 // store maps userId -> Device, backed by SQLite.
 type store struct {
@@ -37,7 +42,16 @@ var migrations = []string{
 		auth_hash     BLOB NOT NULL UNIQUE,
 		registered_at INTEGER NOT NULL
 	)`,
-	`ALTER TABLE devices RENAME COLUMN fcm_token TO fid`,
+	`CREATE TABLE devices_v2 (
+		user_id       TEXT PRIMARY KEY,
+		fid           TEXT,
+		auth_hash     BLOB NOT NULL UNIQUE,
+		registered_at INTEGER NOT NULL
+	);
+	INSERT INTO devices_v2 (user_id, fid, auth_hash, registered_at)
+		SELECT user_id, fcm_token, auth_hash, registered_at FROM devices;
+	DROP TABLE devices;
+	ALTER TABLE devices_v2 RENAME TO devices;`,
 }
 
 // openStore opens the database at path, creating the file and migrating the
@@ -106,36 +120,49 @@ func (s *store) register(userID, fid string) (string, error) {
 	return token, nil
 }
 
-// refresh points an existing userID at a (possibly unchanged) FID and stamps
-// the registration time.
-func (s *store) refresh(userID, fid string) error {
-	_, err := s.db.Exec(
-		`UPDATE devices SET fid = ?, registered_at = ? WHERE user_id = ?`,
-		fid, s.now().Unix(), userID)
-	return err
+// reregister points userID at fid and stamps the registration time, provided
+// authToken owns userID. It returns errNotOwner otherwise.
+func (s *store) reregister(userID, authToken, fid string) error {
+	if authToken == "" {
+		return errNotOwner
+	}
+	sum := sha256.Sum256([]byte(authToken))
+	res, err := s.db.Exec(
+		`UPDATE devices SET fid = ?, registered_at = ? WHERE user_id = ? AND auth_hash = ?`,
+		fid, s.now().Unix(), userID, sum[:])
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errNotOwner
+	}
+	return nil
 }
 
-// unregister deletes userID's registration, but only while it still points at
-// fid, so a registration refreshed since the failed send survives.
-func (s *store) unregister(userID, fid string) error {
-	_, err := s.db.Exec(`DELETE FROM devices WHERE user_id = ? AND fid = ?`, userID, fid)
+// markUnreachable clears userID's FID if it is still deadFID, keeping the
+// userId claim and auth token. A FID registered since deadFID is left alone.
+func (s *store) markUnreachable(userID, deadFID string) error {
+	_, err := s.db.Exec(`UPDATE devices SET fid = NULL WHERE user_id = ? AND fid = ?`, userID, deadFID)
 	return err
 }
 
 func (s *store) lookup(userID string) (Device, bool, error) {
 	var (
-		d          Device
+		fid        sql.NullString
 		registered int64
 	)
-	err := s.db.QueryRow(`SELECT fid, registered_at FROM devices WHERE user_id = ?`, userID).Scan(&d.FID, &registered)
+	err := s.db.QueryRow(`SELECT fid, registered_at FROM devices WHERE user_id = ?`, userID).Scan(&fid, &registered)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Device{}, false, nil
 	}
 	if err != nil {
 		return Device{}, false, err
 	}
-	d.RegisteredAt = time.Unix(registered, 0)
-	return d, true, nil
+	return Device{FID: fid.String, RegisteredAt: time.Unix(registered, 0)}, true, nil
 }
 
 // userByAuth resolves an auth token to the userId that owns it.
