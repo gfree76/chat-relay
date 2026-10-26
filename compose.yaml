@@ -12,12 +12,21 @@ services:
     environment:
       ADDR: ":8080"
       STORE_PATH: /data/devices.db
-      # FCM_PROJECT_ID: your-firebase-project-id
-      # GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/fcm-sa.json
+      FCM_PROJECT_ID: org-gfree76-chat
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/fcm-sa.json
 
-    # The image runs as uid 65532, which must own ./data on the host.
+    # The image runs as uid 65532, which must own ./data and be able to read
+    # ./secrets/fcm-sa.json on the host. The relay refuses to start without the
+    # key; create_host_path: false makes compose fail instead of mounting an
+    # empty directory in its place.
     volumes:
       - ./data:/data
+      - type: bind
+        source: ./secrets/fcm-sa.json
+        target: /run/secrets/fcm-sa.json
+        read_only: true
+        bind:
+          create_host_path: false
 
     # Loopback only — nginx is the sole public entrance. Binding 0.0.0.0 here
     # would expose the relay directly on the box's public IP, bypassing TLS.
