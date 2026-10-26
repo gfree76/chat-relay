@@ -1,7 +1,7 @@
 // Command chat-relay is a minimal, zero-knowledge push relay for the E2E chat app.
 //
 // It does two things:
-//   - POST /register  {userId, fcmToken}      claim a userId, returning the auth token that owns it
+//   - POST /register  {userId, fid}           claim a userId, returning the auth token that owns it
 //   - POST /send      {toUserId, ciphertext}  forward ciphertext to that user via FCM
 //
 // Both re-registering a userId and sending require that auth token as a bearer
@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
@@ -24,13 +25,18 @@ func main() {
 	storePath := flag.String("store", envOr("STORE_PATH", "devices.db"), "path to the SQLite database")
 	flag.Parse()
 
+	fcm, err := newFCMSender(context.Background(), fcmBaseURL, os.Getenv("FCM_PROJECT_ID"))
+	if err != nil {
+		log.Fatalf("configure FCM: %v", err)
+	}
+
 	st, err := openStore(*storePath)
 	if err != nil {
 		log.Fatalf("open store %s: %v", *storePath, err)
 	}
 	defer st.close()
 
-	srv := newServer(st, fcmPush)
+	srv := newServer(st, fcm)
 
 	log.Printf("chat-relay listening on %s", *addr)
 	if err := http.ListenAndServe(*addr, srv.routes()); err != nil {

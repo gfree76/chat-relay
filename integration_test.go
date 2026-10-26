@@ -12,10 +12,10 @@ import (
 
 // TestRoundTrip exercises the full HTTP stack: a real client hitting a real
 // server over TCP, register then send, asserting the push reached the right
-// token end to end. Run with: go test -tags integration -run RoundTrip
+// FID end to end. Run with: go test -tags integration -run RoundTrip
 func TestRoundTrip(t *testing.T) {
 	fp := &fakePusher{}
-	ts := httptest.NewServer(newServer(testStore(t), fp.push).routes())
+	ts := httptest.NewServer(newServer(testStore(t), fp).routes())
 	defer ts.Close()
 
 	post := func(path, body, token string) *http.Response {
@@ -45,13 +45,13 @@ func TestRoundTrip(t *testing.T) {
 		return out.AuthToken
 	}
 
-	resp := post("/register", `{"userId":"geoff","fcmToken":"geoff-tok"}`, "")
+	resp := post("/register", `{"userId":"geoff","fid":"geoff-tok"}`, "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("register sender: got %d, want 200", resp.StatusCode)
 	}
 	sender := authToken(resp)
 
-	resp = post("/register", `{"userId":"wife","fcmToken":"wife-tok"}`, "")
+	resp = post("/register", `{"userId":"wife","fid":"wife-tok"}`, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("register recipient: got %d, want 200", resp.StatusCode)
@@ -62,7 +62,7 @@ func TestRoundTrip(t *testing.T) {
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("send: got %d, want 202", resp.StatusCode)
 	}
-	if len(fp.calls) != 1 || fp.calls[0].token != "wife-tok" || fp.calls[0].ciphertext != "Q0lQSEVS" {
+	if want := (pushCall{"wife-tok", "geoff", "Q0lQSEVS"}); len(fp.calls) != 1 || fp.calls[0] != want {
 		t.Fatalf("push not delivered end-to-end: %+v", fp.calls)
 	}
 

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,17 +17,17 @@ type fakePusher struct {
 	err   error
 }
 
-type pushCall struct{ token, ciphertext string }
+type pushCall struct{ fid, sender, ciphertext string }
 
-func (f *fakePusher) push(token, ciphertext string) error {
-	f.calls = append(f.calls, pushCall{token, ciphertext})
+func (f *fakePusher) push(_ context.Context, fid, sender, ciphertext string) error {
+	f.calls = append(f.calls, pushCall{fid, sender, ciphertext})
 	return f.err
 }
 
 func newTestServer(t *testing.T) (*server, *fakePusher) {
 	t.Helper()
 	fp := &fakePusher{}
-	return newServer(testStore(t), fp.push), fp
+	return newServer(testStore(t), fp), fp
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -45,9 +47,9 @@ func doAuth(t *testing.T, h http.Handler, method, path, body, token string) *htt
 }
 
 // registerUser claims a userId through the HTTP surface and returns its auth token.
-func registerUser(t *testing.T, h http.Handler, userID, fcmToken string) string {
+func registerUser(t *testing.T, h http.Handler, userID, fid string) string {
 	t.Helper()
-	rec := do(t, h, "POST", "/register", `{"userId":"`+userID+`","fcmToken":"`+fcmToken+`"}`)
+	rec := do(t, h, "POST", "/register", `{"userId":"`+userID+`","fid":"`+fid+`"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("register %s: got %d, want 200", userID, rec.Code)
 	}
@@ -69,7 +71,7 @@ func TestRegisterHandler(t *testing.T) {
 	if _, ok, _ := srv.store.lookup("geoff"); !ok {
 		t.Fatal("user not stored after register")
 	}
-	if rec := do(t, h, "POST", "/register", `{"userId":"","fcmToken":""}`); rec.Code != http.StatusBadRequest {
+	if rec := do(t, h, "POST", "/register", `{"userId":"","fid":""}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing fields: got %d, want 400", rec.Code)
 	}
 	if rec := do(t, h, "POST", "/register", `not json`); rec.Code != http.StatusBadRequest {
@@ -85,21 +87,21 @@ func TestRegisterRefreshRequiresOwnership(t *testing.T) {
 	h := srv.routes()
 	token := registerUser(t, h, "geoff", "tok1")
 
-	body := `{"userId":"geoff","fcmToken":"tok2"}`
+	body := `{"userId":"geoff","fid":"tok2"}`
 	if rec := do(t, h, "POST", "/register", body); rec.Code != http.StatusForbidden {
 		t.Fatalf("reclaim without token: got %d, want 403", rec.Code)
 	}
 	if rec := doAuth(t, h, "POST", "/register", body, "wrong-token"); rec.Code != http.StatusForbidden {
 		t.Fatalf("reclaim with wrong token: got %d, want 403", rec.Code)
 	}
-	if got, _, _ := srv.store.lookup("geoff"); got.FCMToken != "tok1" {
+	if got, _, _ := srv.store.lookup("geoff"); got.FID != "tok1" {
 		t.Fatalf("device token changed by a rejected reclaim: %+v", got)
 	}
 
 	if rec := doAuth(t, h, "POST", "/register", body, token); rec.Code != http.StatusNoContent {
 		t.Fatalf("owner refresh: got %d, want 204", rec.Code)
 	}
-	if got, _, _ := srv.store.lookup("geoff"); got.FCMToken != "tok2" {
+	if got, _, _ := srv.store.lookup("geoff"); got.FID != "tok2" {
 		t.Fatalf("owner refresh did not update token: %+v", got)
 	}
 }
@@ -114,7 +116,7 @@ func TestSendHandler(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("send to known: got %d, want 202", rec.Code)
 	}
-	if len(fp.calls) != 1 || fp.calls[0].token != "wife-tok" || fp.calls[0].ciphertext != "SGVsbG8=" {
+	if want := (pushCall{"wife-tok", "geoff", "SGVsbG8="}); len(fp.calls) != 1 || fp.calls[0] != want {
 		t.Fatalf("push not called correctly: %+v", fp.calls)
 	}
 
@@ -152,6 +154,39 @@ func TestSendHandlerPushError(t *testing.T) {
 
 	if rec := doAuth(t, h, "POST", "/send", `{"toUserId":"wife","ciphertext":"x"}`, sender); rec.Code != http.StatusBadGateway {
 		t.Fatalf("push error: got %d, want 502", rec.Code)
+	}
+}
+
+func TestSendHandlerUnregisteredDeletesRecipient(t *testing.T) {
+	srv, fp := newTestServer(t)
+	h := srv.routes()
+	sender := registerUser(t, h, "geoff", "geoff-tok")
+	registerUser(t, h, "wife", "wife-tok")
+	fp.err = fmt.Errorf("%w (HTTP 404 UNREGISTERED)", errUnregistered)
+
+	if rec := doAuth(t, h, "POST", "/send", `{"toUserId":"wife","ciphertext":"x"}`, sender); rec.Code != http.StatusGone {
+		t.Fatalf("unregistered recipient: got %d, want 410", rec.Code)
+	}
+	if _, ok, _ := srv.store.lookup("wife"); ok {
+		t.Fatal("recipient registration survived an UNREGISTERED push")
+	}
+	if _, ok, _ := srv.store.lookup("geoff"); !ok {
+		t.Fatal("sender registration deleted by recipient's UNREGISTERED push")
+	}
+}
+
+func TestSendHandlerRejectsOversizedPayload(t *testing.T) {
+	srv, fp := newTestServer(t)
+	h := srv.routes()
+	sender := registerUser(t, h, "geoff", "geoff-tok")
+	registerUser(t, h, "wife", "wife-tok")
+
+	body := `{"toUserId":"wife","ciphertext":"` + strings.Repeat("A", maxDataBytes) + `"}`
+	if rec := doAuth(t, h, "POST", "/send", body, sender); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized ciphertext: got %d, want 413", rec.Code)
+	}
+	if len(fp.calls) != 0 {
+		t.Fatalf("oversized payload reached FCM: %d calls", len(fp.calls))
 	}
 }
 

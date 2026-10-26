@@ -94,7 +94,27 @@ runs as uid 65532, so that uid must own the directory:
     sudo mkdir -p /home/DEPLOY_USER/chat-relay/data
     sudo chown 65532:65532 /home/DEPLOY_USER/chat-relay/data
 
-## 6. nginx + TLS
+## 6. FCM service-account key
+
+The relay sends pushes as a Firebase service account and refuses to start
+without its key. `compose.yaml` sets `FCM_PROJECT_ID=org-gfree76-chat` and
+bind-mounts `secrets/fcm-sa.json` read-only at
+`/run/secrets/fcm-sa.json` (`GOOGLE_APPLICATION_CREDENTIALS`). If the file is
+absent, `docker compose up` fails and so does the deploy.
+
+Copy the key from your workstation, then install it readable only by uid 65532:
+
+    scp fcm-sa.json YOU@DEPLOY_HOST:/tmp/fcm-sa.json
+    # then on the box:
+    sudo install -d -m 700 /home/DEPLOY_USER/chat-relay/secrets
+    sudo install -m 400 -o 65532 -g 65532 /tmp/fcm-sa.json \
+        /home/DEPLOY_USER/chat-relay/secrets/fcm-sa.json
+    shred -u /tmp/fcm-sa.json
+
+To rotate, install the new key over the old one and
+`docker compose restart chat-relay`.
+
+## 7. nginx + TLS
 
 Edit `deploy/nginx/chat-relay.conf` to set `server_name RELAY_HOST;`, then:
 
@@ -106,7 +126,7 @@ Edit `deploy/nginx/chat-relay.conf` to set `server_name RELAY_HOST;`, then:
 certbot rewrites the vhost in place with the 443 block and an 80→443 redirect,
 and installs its own renewal timer. Nothing to schedule.
 
-## 7. Repo secrets
+## 8. Repo secrets
 
     gh secret set SSH_HOST   --repo gfree76/chat-relay --body "DEPLOY_HOST"
     gh secret set SSH_USER   --repo gfree76/chat-relay --body "DEPLOY_USER"
@@ -118,7 +138,7 @@ and installs its own renewal timer. Nothing to schedule.
 trusting whatever answers on that IP. Setting `SSH_HOST` is also what flips the
 deploy job from skipped to live — until then it no-ops and the run stays green.
 
-## 8. Verify
+## 9. Verify
 
     curl -si https://RELAY_HOST/healthz
 
@@ -128,9 +148,6 @@ Watch it serve:
 
 ## Known gaps
 
-- `fcmPush` is still a stub that logs instead of sending. Deliberate: prove the
-  path first, wire FCM second. The relay will accept `/register` and `/send` and
-  push nothing.
 - `compose.yaml` tracks `:latest`. The workflow also tags each image with the
   commit SHA, so pinning is available if a rollback is ever needed.
 - Registrations live in `data/devices.db` on the box. Deleting it forces every

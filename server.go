@@ -8,17 +8,13 @@ import (
 	"strings"
 )
 
-// pushFunc delivers ciphertext to a device token. It's a field on server so
-// tests can inject a fake and never touch real FCM.
-type pushFunc func(fcmToken, ciphertext string) error
-
 type server struct {
-	store *store
-	push  pushFunc
+	store  *store
+	pusher pusher
 }
 
-func newServer(s *store, push pushFunc) *server {
-	return &server{store: s, push: push}
+func newServer(s *store, p pusher) *server {
+	return &server{store: s, pusher: p}
 }
 
 // routes returns the HTTP handler. Method-based patterns (Go 1.22) give us
@@ -32,8 +28,8 @@ func (srv *server) routes() http.Handler {
 }
 
 type registerRequest struct {
-	UserID   string `json:"userId"`
-	FCMToken string `json:"fcmToken"`
+	UserID string `json:"userId"`
+	FID    string `json:"fid"`
 }
 
 type registerResponse struct {
@@ -50,12 +46,12 @@ func (srv *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.UserID == "" || req.FCMToken == "" {
-		http.Error(w, "userId and fcmToken are required", http.StatusBadRequest)
+	if req.UserID == "" || req.FID == "" {
+		http.Error(w, "userId and fid are required", http.StatusBadRequest)
 		return
 	}
 
-	token, err := srv.store.register(req.UserID, req.FCMToken)
+	token, err := srv.store.register(req.UserID, req.FID)
 	switch {
 	case err == nil:
 		log.Printf("registered %s", req.UserID)
@@ -80,7 +76,7 @@ func (srv *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "userId belongs to another client", http.StatusForbidden)
 		return
 	}
-	if err := srv.store.refresh(req.UserID, req.FCMToken); err != nil {
+	if err := srv.store.refresh(req.UserID, req.FID); err != nil {
 		log.Printf("refresh %s: %v", req.UserID, err)
 		http.Error(w, "failed to register", http.StatusInternalServerError)
 		return
@@ -110,6 +106,10 @@ func (srv *server) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "toUserId and ciphertext are required", http.StatusBadRequest)
 		return
 	}
+	if !fitsFCMPayload(sender, req.Ciphertext) {
+		http.Error(w, "ciphertext too large for a push", http.StatusRequestEntityTooLarge)
+		return
+	}
 	dev, found, err := srv.store.lookup(req.ToUserID)
 	if err != nil {
 		log.Printf("lookup %s: %v", req.ToUserID, err)
@@ -120,7 +120,16 @@ func (srv *server) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "recipient not registered", http.StatusNotFound)
 		return
 	}
-	if err := srv.push(dev.FCMToken, req.Ciphertext); err != nil {
+	err = srv.pusher.push(r.Context(), dev.FID, sender, req.Ciphertext)
+	switch {
+	case errors.Is(err, errUnregistered):
+		log.Printf("push %s -> %s: %v; deleting registration", sender, req.ToUserID, err)
+		if err := srv.store.unregister(req.ToUserID, dev.FID); err != nil {
+			log.Printf("unregister %s: %v", req.ToUserID, err)
+		}
+		http.Error(w, "recipient is no longer registered", http.StatusGone)
+		return
+	case err != nil:
 		log.Printf("push %s -> %s failed: %v", sender, req.ToUserID, err)
 		http.Error(w, "failed to deliver", http.StatusBadGateway)
 		return
