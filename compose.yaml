@@ -11,8 +11,13 @@ services:
     restart: unless-stopped
     environment:
       ADDR: ":8080"
+      STORE_PATH: /data/devices.db
       # FCM_PROJECT_ID: your-firebase-project-id
       # GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/fcm-sa.json
+
+    # The image runs as uid 65532, which must own ./data on the host.
+    volumes:
+      - ./data:/data
 
     # Loopback only — nginx is the sole public entrance. Binding 0.0.0.0 here
     # would expose the relay directly on the box's public IP, bypassing TLS.

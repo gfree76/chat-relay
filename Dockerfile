@@ -1,8 +1,7 @@
 # --- build stage ---
-FROM golang:1.22-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
-# Only go.mod for now (stdlib-only, no go.sum yet). Add go.sum when deps arrive.
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /chat-relay .
